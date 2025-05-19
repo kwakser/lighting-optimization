@@ -1,0 +1,37 @@
+{
+  "config": {
+    "duration": 300,
+    "time_scale": 1.0
+  },
+  "events": [
+    {
+      "time": 0,
+      "actions": [
+        {"type": "set", "param": "time_of_day", "value": "day"},
+        {"type": "set", "param": "weather", "value": "clear"},
+        {"type": "set", "param": "traffic_mode", "value": "uniform"},
+        {"type": "set", "param": "traffic_density", "value": 0.3},
+        {"type": "set", "param": "traffic_speed", "value": 60}
+      ]
+    },
+    {
+      "time": 60,
+      "actions": [
+        {"type": "ramp", "param": "traffic_density", "from": 0.3, "to": 0.8, "duration": 120}
+      ]
+    },
+    {
+      "time": 180,
+      "actions": [
+        {"type": "set", "param": "weather", "value": "rain"},
+        {"type": "set", "param": "time_of_day", "value": "twilight"}
+      ]
+    },
+    {
+      "time": 240,
+      "actions": [
+        {"type": "ramp", "param": "traffic_speed", "from": 60, "to": 30, "duration": 60}
+      ]
+    }
+  ]
+}
