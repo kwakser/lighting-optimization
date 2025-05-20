@@ -132,6 +132,7 @@ class TrafficSimulator:
                 self.add_car(x, self.traffic_speed * random.uniform(0.8, 1.2))
 
     def update(self, delta_t=1, alpha=0.5, beta=0.1, gamma=0.2, delta=0.4, n_max=10):
+        beta = beta * (self.traffic_speed / 50)
         if self._time_of_day_numeric != self._target_time_of_day_numeric:
             step = delta_t / self._time_of_day_transition_duration
             diff = self._target_time_of_day_numeric - self._time_of_day_numeric
