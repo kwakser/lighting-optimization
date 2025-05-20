@@ -1,5 +1,6 @@
 import sys
 import json
+import csv
 import numpy as np
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -8,6 +9,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer
 import pyqtgraph as pg
+import pyqtgraph.exporters
 
 from model import (
     TrafficSimulator,
@@ -78,7 +80,7 @@ class MainWindow(QMainWindow):
         self.slider_speed.setValue(50)
         control_layout.addRow(QLabel("Скорость трафика (км/ч):"), self.slider_speed)
 
-        # Вертикальный layout для кнопок управления
+        # Кнопки управления
         btn_layout = QVBoxLayout()
         self.btn_apply = QPushButton("Применить условия")
         self.btn_generate = QPushButton("Сгенерировать трафик")
@@ -86,6 +88,7 @@ class MainWindow(QMainWindow):
         self.btn_stop = QPushButton("Остановить")
         self.btn_clear = QPushButton("Очистить")
         self.btn_load_scenario = QPushButton("Загрузить сценарий")
+        self.btn_save_plots = QPushButton("Сохранить графики")
 
         btn_layout.addWidget(self.btn_apply)
         btn_layout.addWidget(self.btn_generate)
@@ -93,6 +96,7 @@ class MainWindow(QMainWindow):
         btn_layout.addWidget(self.btn_stop)
         btn_layout.addWidget(self.btn_clear)
         btn_layout.addWidget(self.btn_load_scenario)
+        btn_layout.addWidget(self.btn_save_plots)
 
         control_layout.addRow(btn_layout)
 
@@ -108,7 +112,7 @@ class MainWindow(QMainWindow):
         self.plot_energy.showGrid(x=True, y=True)
         self.energy_line_smart = self.plot_energy.plot(pen=pg.mkPen('g', width=2), name="Умное освещение")
         self.energy_line_trad = self.plot_energy.plot(pen=pg.mkPen('r', width=2), name="Традиционное освещение")
-        self.energy_text = pg.TextItem("", anchor=(0, 1))
+        self.energy_text = pg.TextItem("", anchor=(1, 0))
         self.plot_energy.addItem(self.energy_text)
         plot_layout.addWidget(self.plot_energy)
 
@@ -131,6 +135,7 @@ class MainWindow(QMainWindow):
         self.btn_stop.clicked.connect(self.stop_simulation)
         self.btn_clear.clicked.connect(self.clear_simulation)
         self.btn_load_scenario.clicked.connect(self.load_scenario)
+        self.btn_save_plots.clicked.connect(self.save_plots)
 
         self.simulation_running = False
 
@@ -144,11 +149,29 @@ class MainWindow(QMainWindow):
         self.time_multiplier = 1.0
         self.ramp_animations = {}
 
+        self.simulation_duration = 3600
+
+        # CSV для записи данных
+        self.csv_file = None
+        self.csv_writer = None
+
     def apply_conditions(self):
         try:
             tod = self.time_of_day_map[self.combo_time_of_day.currentText()]
             weather = self.weather_map[self.combo_weather.currentText()]
+            traffic_mode = self.traffic_mode_map[self.combo_traffic_mode.currentText()]
+            traffic_density = self.slider_density.value() / 100.0
+            traffic_speed = self.slider_speed.value()
+
             self.simulator.set_conditions(tod, weather)
+            self.simulator.traffic_mode = traffic_mode
+            self.simulator.traffic_density = traffic_density
+            self.simulator.traffic_speed = traffic_speed
+
+            self.simulator.generate_traffic()
+            self.simulator.update(delta_t=0)  # обновляем состояние без продвижения времени
+
+            self.update_plots()
         except Exception as e:
             QMessageBox.warning(self, "Ошибка", f"Ошибка установки условий:\n{e}")
 
@@ -183,7 +206,7 @@ class MainWindow(QMainWindow):
             "config": scenario.get("config", {})
         }
         self.time_multiplier = self.active_scenario["config"].get("time_scale", 1.0)
-        self.simulation_duration = self.active_scenario["config"].get("duration", 1800)
+        self.simulation_duration = self.active_scenario["config"].get("duration", 300)
 
         self.clear_simulation()
         self.process_initial_events()
@@ -222,7 +245,7 @@ class MainWindow(QMainWindow):
                         break
             else:
                 setter(int(value))
-            self._sync_simulator()
+            self.apply_conditions()  # сразу применяем изменения
 
     def start_value_ramp(self, action):
         param = action.get("param")
@@ -252,13 +275,15 @@ class MainWindow(QMainWindow):
 
     def start_simulation(self):
         if not self.simulation_running:
-            self.apply_conditions()
-            self.generate_traffic()
+            # Открываем CSV для записи
+            self.open_csv_file()
+
             self.simulator.reset()
             self.time_data.clear()
             self.energy_smart_data.clear()
             self.energy_trad_data.clear()
             self.brightness_data.clear()
+
             self.simulation_running = True
             self.scenario_time = 0.0
             self.ramp_animations.clear()
@@ -268,6 +293,10 @@ class MainWindow(QMainWindow):
         if self.simulation_running:
             self.timer.stop()
             self.simulation_running = False
+            if self.csv_file:
+                self.csv_file.close()
+                self.csv_file = None
+                self.csv_writer = None
 
     def clear_simulation(self):
         self.stop_simulation()
@@ -284,7 +313,6 @@ class MainWindow(QMainWindow):
 
         self.scenario_time += 1 * self.time_multiplier
 
-        # Обработка событий сценария
         if self.active_scenario:
             while (self.active_scenario["current_event"] < len(self.active_scenario["events"]) and
                    self.scenario_time >= self.active_scenario["events"][self.active_scenario["current_event"]]["time"]):
@@ -292,7 +320,6 @@ class MainWindow(QMainWindow):
                 self.process_event(event)
                 self.active_scenario["current_event"] += 1
 
-        # Обработка плавных изменений (ramp)
         to_remove = []
         for param, anim in self.ramp_animations.items():
             if self.scenario_time >= anim["end_time"]:
@@ -305,7 +332,6 @@ class MainWindow(QMainWindow):
         for param in to_remove:
             del self.ramp_animations[param]
 
-        # Обновление симуляции
         self.simulator.update(delta_t=1)
         t = self.simulator.time
         self.time_data.append(t)
@@ -314,6 +340,7 @@ class MainWindow(QMainWindow):
         self.brightness_data.append(np.mean([light.current_brightness for light in self.simulator.lights]))
 
         self.update_plots()
+        self.write_csv_row()
 
         if self.scenario_time >= self.simulation_duration:
             self.stop_simulation()
@@ -335,17 +362,7 @@ class MainWindow(QMainWindow):
                         break
             else:
                 setter(int(value))
-            self._sync_simulator()
-
-    def _sync_simulator(self):
-        self.simulator.set_conditions(
-            self.time_of_day_map[self.combo_time_of_day.currentText()],
-            self.weather_map[self.combo_weather.currentText()]
-        )
-        self.simulator.traffic_mode = self.traffic_mode_map[self.combo_traffic_mode.currentText()]
-        self.simulator.traffic_density = self.slider_density.value() / 100.0
-        self.simulator.traffic_speed = self.slider_speed.value()
-        self.simulator.generate_traffic()
+            self.apply_conditions()
 
     def update_plots(self):
         self.energy_line_smart.setData(self.time_data, self.energy_smart_data)
@@ -355,9 +372,91 @@ class MainWindow(QMainWindow):
         if self.energy_trad_data and self.energy_trad_data[-1] > 0:
             economy = (self.energy_trad_data[-1] - self.energy_smart_data[-1]) / self.energy_trad_data[-1] * 100
             self.energy_text.setText(f"Экономия: {economy:.1f}%")
-            self.energy_text.setPos(self.time_data[-1], self.energy_smart_data[-1])
+
+            vb = self.plot_energy.getViewBox()
+            x_range, y_range = vb.viewRange()
+            x_min, x_max = x_range
+            y_min, y_max = y_range
+            x_pos = x_max - (x_max - x_min) * 0.02
+            y_pos = y_max - (y_max - y_min) * 0.05
+            self.energy_text.setPos(x_pos, y_pos)
         else:
             self.energy_text.setText("")
+
+    def open_csv_file(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Сохранить данные симуляции в CSV", "", "CSV Files (*.csv)")
+        if path:
+            self.csv_file = open(path, 'w', newline='', encoding='utf-8-sig')
+            self.csv_writer = csv.writer(self.csv_file, delimiter=';')
+            header = [
+                "Время (с)",
+                "Энергия умного освещения (кВт·ч)",
+                "Энергия традиционного освещения (кВт·ч)",
+                "Средняя яркость фонарей",
+                "Время суток",
+                "Погода",
+                "Режим трафика",
+                "Плотность трафика",
+                "Скорость трафика (км/ч)",
+                "Экономия (%)"
+            ]
+            self.csv_writer.writerow(header)
+        else:
+            self.csv_file = None
+            self.csv_writer = None
+
+    def write_csv_row(self):
+        if self.csv_writer is None:
+            return
+        try:
+            tod_text = self.combo_time_of_day.currentText()
+            weather_text = self.combo_weather.currentText()
+            traffic_mode_text = self.combo_traffic_mode.currentText()
+            traffic_density = self.slider_density.value() / 100.0
+            traffic_speed = self.slider_speed.value()
+
+            energy_smart = self.simulator.energy_smart_kwh
+            energy_trad = self.simulator.energy_traditional_kwh
+            brightness_avg = np.mean([light.current_brightness for light in self.simulator.lights])
+
+            if energy_trad > 0:
+                economy = (energy_trad - energy_smart) / energy_trad * 100
+            else:
+                economy = 0.0
+
+            row = [
+                self.simulator.time,
+                energy_smart,
+                energy_trad,
+                brightness_avg,
+                tod_text,
+                weather_text,
+                traffic_mode_text,
+                f"{traffic_density:.2f}",
+                traffic_speed,
+                f"{economy:.2f}"
+            ]
+            self.csv_writer.writerow(row)
+        except Exception as e:
+            print(f"Ошибка записи CSV: {e}")
+
+    def save_plots(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Сохранить графики", "", "PNG Files (*.png);;JPEG Files (*.jpg)")
+        if not path:
+            return
+        try:
+            exporter1 = pg.exporters.ImageExporter(self.plot_energy.plotItem)
+            exporter1.parameters()['width'] = 800
+            exporter1.export(path)
+
+            path_brightness = path.rsplit('.', 1)[0] + "_brightness.png"
+            exporter2 = pg.exporters.ImageExporter(self.plot_brightness.plotItem)
+            exporter2.parameters()['width'] = 800
+            exporter2.export(path_brightness)
+
+            QMessageBox.information(self, "Успех", f"Графики сохранены в {path}")
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось сохранить графики:\n{e}")
 
 
 def main():
